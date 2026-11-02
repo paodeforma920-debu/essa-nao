@@ -1,58 +1,80 @@
 --[[
-    Script EXECUTOR - Caracois da Sirene (v2)
+    Script EXECUTOR - Caracois da Sirene (v3)
     ------------------------------------------
     * Toca a sirene de alerta em LOOP
-    * Spawn 5 caracois no mapa que se movem bem lentamente
+    * Spawn 5 caracois no mapa (mais longe do jogador)
+    * Os caracois COLIDEM com paredes (rebatem ao bater)
     * A tela pisca em vermelho
     * Contador na tela: "VERIFIQUE OS CARACOIS"  X / 5
+    * TIMER de 40 segundos
     * A GUI treme (tremer) enquanto nao coletar todos
     * O jogador coleta os caracois passando por cima
-    * Quando coletar todos: som PARA, vermelho some, tremor para
+    * Vitoria: som PARA, vermelho some, tremor para
+    * Derrota (tempo acabou): KICK com mensagem
 ]]--
 
-local URL = "https://www.myinstants.com/media/sounds/alerta-sirena.mp3"
-local ARQUIVO = "alerta_sirena.mp3"
+local TEMPO_TOTAL = 40  -- segundos
+
+local URL_SIRENE = "https://www.myinstants.com/media/sounds/alarm-sound-effect.mp3"
+local ARQUIVO_SIRENE = "alarm_sirene.mp3"
+
+local URL_COIN = "https://www.myinstants.com/media/sounds/subway-surfers-coin-collecting-sound.mp3"
+local ARQUIVO_COIN = "coin_collect.mp3"
+
 local TOTAL_CARACOIS = 5
 
 -- ============================================================
--- 1. CARREGA O SOM
+-- 1. CARREGA OS SONS (sirene + coin)
 -- ============================================================
-local function carregarSom()
-    local data = game:HttpGet(URL)
-    writefile(ARQUIVO, data)
+local function carregarSom(url, arquivo, nomeLog)
+    local data = game:HttpGet(url)
+    writefile(arquivo, data)
 
-    local function tenta(nome, fn)
+    local function tenta(label, fn)
         local ok, res = pcall(fn)
-        if ok and res then print("[Caracois] Som carregado via: " .. nome) return res end
+        if ok and res then print("[Caracois] " .. nomeLog .. " carregado via: " .. label) return res end
         return nil
     end
 
     return tenta("getcustomasset", function()
         local s = Instance.new("Sound")
-        s.SoundId = getcustomasset(ARQUIVO)
+        s.SoundId = getcustomasset(arquivo)
         return s
     end) or tenta("getsynasset", function()
         local s = Instance.new("Sound")
-        s.SoundId = getsynasset(ARQUIVO)
+        s.SoundId = getsynasset(arquivo)
         return s
     end) or tenta("loadaudio", function()
-        local id = loadaudio(ARQUIVO)
+        local id = loadaudio(arquivo)
         local s = Instance.new("Sound")
         s.SoundId = "rbxassetid://" .. tostring(id)
         return s
     end)
 end
 
-local somOk, som = pcall(carregarSom)
+-- Sirene (loop infinito)
+local somOk, som = pcall(carregarSom, URL_SIRENE, ARQUIVO_SIRENE, "Sirene")
 if not somOk or not som then
-    warn("[Caracois] Nao consegui carregar o som. Continuando mesmo assim...")
-    som = Instance.new("Sound")  -- sound vazio, so pra nao quebrar
+    warn("[Caracois] Nao consegui carregar a sirene. Continuando mesmo assim...")
+    som = Instance.new("Sound")
 end
 som.Name = "SireneLoop"
 som.Volume = 1
 som.Looped = true
 som.Parent = workspace
 som:Play()
+
+-- Som de coleta (preload)
+local coinOk, coinSound = pcall(carregarSom, URL_COIN, ARQUIVO_COIN, "Coin")
+if not coinOk or not coinSound then
+    warn("[Caracois] Nao consegui carregar o som de coleta. Usando beep padrao.")
+    coinSound = Instance.new("Sound")
+    coinSound.SoundId = "rbxassetid://322911410"
+end
+coinSound.Name = "CoinCollect"
+coinSound.Volume = 0.8
+coinSound.Looped = false
+coinSound.Parent = workspace
 
 -- ============================================================
 -- 2. GUI (overlay vermelho + contador + tremor)
@@ -86,11 +108,32 @@ shakeContainer.Parent = gui
 
 -- Contador (dentro do shakeContainer)
 local contadorFrame = Instance.new("Frame")
-contadorFrame.Size = UDim2.new(1, 0, 1, 0)
+contadorFrame.Size = UDim2.new(1, 0, 0, 80)
 contadorFrame.BackgroundColor3 = Color3.fromRGB(15, 15, 15)
 contadorFrame.BackgroundTransparency = 0.1
 contadorFrame.BorderSizePixel = 0
 contadorFrame.Parent = shakeContainer
+
+-- Timer (embaixo do contador, dentro do shakeContainer)
+local timerLabel = Instance.new("TextLabel")
+timerLabel.Size = UDim2.new(1, 0, 0, 40)
+timerLabel.Position = UDim2.new(0, 0, 0, 80)
+timerLabel.BackgroundColor3 = Color3.fromRGB(40, 0, 0)
+timerLabel.BackgroundTransparency = 0.1
+timerLabel.BorderSizePixel = 0
+timerLabel.Text = "TEMPO: " .. TEMPO_TOTAL
+timerLabel.Font = Enum.Font.GothamBlack
+timerLabel.TextSize = 24
+timerLabel.TextColor3 = Color3.fromRGB(255, 220, 80)
+timerLabel.Parent = shakeContainer
+
+-- Aumenta o tamanho do container pra abranger os dois
+shakeContainer.Size = UDim2.new(0, 280, 0, 125)
+contadorFrame.Size = UDim2.new(1, 0, 0, 80)
+
+local timerCorner = Instance.new("UICorner")
+timerCorner.CornerRadius = UDim.new(0, 12)
+timerCorner.Parent = timerLabel
 
 local corner = Instance.new("UICorner")
 corner.CornerRadius = UDim.new(0, 12)
@@ -131,7 +174,43 @@ end
 -- 3. TREMOR DA GUI + PISCAR VERMELHO (rodando em loop)
 -- ============================================================
 local basePos = UDim2.new(0.5, -140, 0, 30)
+local tempoRestante = TEMPO_TOTAL
+local tempoAcabou = false
+local jogoAtivo = true  -- controla tudo (vitoria ou derrota)
 
+-- ============================================================
+-- 3a. TIMER (40 segundos -> kick se acabar)
+-- ============================================================
+task.spawn(function()
+    while jogoAtivo and tempoRestante > 0 do
+        task.wait(1)
+        if not jogoAtivo then break end
+        tempoRestante = tempoRestante - 1
+        timerLabel.Text = "TEMPO: " .. tempoRestante
+
+        -- Fica vermelho quando faltam <= 10s
+        if tempoRestante <= 10 then
+            timerLabel.TextColor3 = Color3.fromRGB(255, 80, 80)
+        end
+
+        if tempoRestante <= 0 then
+            break
+        end
+    end
+
+    -- Se o tempo acabou e o jogador nao venceu -> KICK
+    if jogoAtivo and coletados < TOTAL_CARACOIS then
+        tempoAcabou = true
+        jogoAtivo = false
+        ativo = false
+        som:Stop()
+        -- Pequeno delay pra garantir que a GUI fecha
+        task.wait(0.3)
+        player:Kick("você não verificou os caracóis!!!")
+    end
+end)
+
+-- Tremor da GUI
 task.spawn(function()
     while ativo do
         -- Tremor: offset aleatorio pequeno
@@ -228,9 +307,9 @@ local function criarCaracol(posicao)
 end
 
 -- ============================================================
--- 5. ACHAR SPAWN NO CHAO
+-- 5. ACHAR SPAWN NO CHAO (mais longe, mas sempre valido)
 -- ============================================================
-local function acharSpawn(raio)
+local function acharSpawn(distMin, distMax)
     local char = player.Character or player.CharacterAdded:Wait()
     local hrp = char:WaitForChild("HumanoidRootPart")
     local origem = hrp.Position
@@ -239,23 +318,65 @@ local function acharSpawn(raio)
     params.FilterType = Enum.RaycastFilterType.Exclude
     params.FilterDescendantsInstances = { char }
 
-    for _ = 1, 60 do
+    local candidatos = {}
+
+    for _ = 1, 120 do
         local ang = math.random() * math.pi * 2
-        local dist = raio + math.random() * 20
+        local dist = distMin + math.random() * (distMax - distMin)
         local alvo = origem + Vector3.new(math.cos(ang) * dist, 0, math.sin(ang) * dist)
 
+        -- 1) Raycast curto pra baixo (so 80 studs) pra achar o chao
         local result = workspace:Raycast(
-            alvo + Vector3.new(0, 80, 0),
-            Vector3.new(0, -150, 0),
+            alvo + Vector3.new(0, 30, 0),
+            Vector3.new(0, -80, 0),
             params
         )
-        if result then
-            return result.Position
+        if not result then continue end
+
+        local pos = result.Position
+
+        -- 2) Validacao de sanidade: Y tem que estar perto do jogador
+        if math.abs(pos.Y - origem.Y) > 30 then continue end
+
+        -- 3) Verifica se ha parede entre o jogador e o spawn (raio horizontal)
+        local dirH = (Vector3.new(pos.X, origem.Y, pos.Z) - origem)
+        local distH = dirH.Magnitude
+        local hitHorizontal = workspace:Raycast(
+            origem + Vector3.new(0, 2, 0),
+            dirH.Unit * distH,
+            params
+        )
+        if hitHorizontal then
+            -- Tem parede no caminho: rejeita
+            continue
         end
+
+        -- 4) Verifica se o spawn esta dentro de uma parede (raycast das 4 direcoes)
+        local dentroParede = false
+        for _, dir in ipairs({
+            Vector3.new(2, 0, 0), Vector3.new(-2, 0, 0),
+            Vector3.new(0, 0, 2), Vector3.new(0, 0, -2),
+        }) do
+            local hit = workspace:Raycast(pos + Vector3.new(0, 1, 0), dir, params)
+            if hit and hit.Distance < 2 then
+                dentroParede = true
+                break
+            end
+        end
+        if dentroParede then continue end
+
+        table.insert(candidatos, pos)
+        if #candidatos >= 5 then break end
     end
 
-    -- Fallback: spawn na posicao do proprio jogador + offset
-    return origem + Vector3.new(math.random(-20, 20), 0, math.random(-20, 20))
+    if #candidatos > 0 then
+        return candidatos[math.random(1, #candidatos)]
+    end
+
+    -- Fallback SEGURO: na altura do proprio jogador
+    local ang = math.random() * math.pi * 2
+    local dist = math.random(distMin, distMax)
+    return origem + Vector3.new(math.cos(ang) * dist, 0, math.sin(ang) * dist)
 end
 
 -- ============================================================
@@ -264,22 +385,24 @@ end
 local caracois = {}
 
 for i = 1, TOTAL_CARACOIS do
-    local pos = acharSpawn(20 + i * 8)
+    -- Snails spawnam mais longe: entre 50 e 90 studs do jogador
+    local pos = acharSpawn(50, 90)
     local model, primary = criarCaracol(pos)
     local caracol = {
         model = model,
         primary = primary,
         coletado = false,
-        velocidade = 0.4 + math.random() * 0.3,  -- bem lento
+        velocidade = 3 + math.random() * 2,  -- 3 a 5 studs/s
         direcao = Vector3.new(math.random(-1, 1), 0, math.random(-1, 1)).Unit,
         centroSpawn = pos,
+        rotacaoAtual = CFrame.new(pos),
     }
     table.insert(caracois, caracol)
     print("[Caracois] Caracol " .. i .. " spawnado em: " .. tostring(pos))
 end
 
 -- ============================================================
--- 7. MOVIMENTO LENTO (move partes via CFrame, mantendo relativo)
+-- 7. MOVIMENTO + ROTACAO + COLISAO COM PAREDES
 -- ============================================================
 task.spawn(function()
     while ativo do
@@ -291,18 +414,45 @@ task.spawn(function()
                     c.direcao = Vector3.new(math.cos(ang), 0, math.sin(ang))
                 end
 
-                -- Move o modelo inteiro (PrimaryPart + offset relativo)
-                local delta = c.direcao * c.velocidade * 0.2  -- bem lento
-                c.model:TranslateBy(delta)
-
-                -- Limita pra nao fugir demais (volta pro centro se passar de 60 studs)
+                -- Limita pra nao fugir demais (volta pro centro se passar de 50 studs)
                 local distCentro = (c.primary.Position - c.centroSpawn).Magnitude
-                if distCentro > 60 then
+                if distCentro > 50 then
                     c.direcao = (c.centroSpawn - c.primary.Position).Unit
                 end
+
+                -- Distancia que vai mover neste frame
+                local distanciaMovimento = c.velocidade * 0.1
+
+                -- Verifica colisao com parede (raycast na direcao do movimento)
+                local params = RaycastParams.new()
+                params.FilterType = Enum.RaycastFilterType.Exclude
+                params.FilterDescendantsInstances = { c.model }
+
+                local rayOrigin = c.primary.Position + Vector3.new(0, 1, 0)
+                local rayDir = c.direcao * (distanciaMovimento + 2)  -- margem de seguranca
+                local hit = workspace:Raycast(rayOrigin, rayDir, params)
+
+                if hit then
+                    -- Bateu na parede: REBATE a direcao usando a normal da parede
+                    local normal = hit.Normal
+                    normal = Vector3.new(normal.X, 0, normal.Z).Unit
+                    c.direcao = (c.direcao - 2 * c.direcao:Dot(normal) * normal).Unit
+                    -- Pequeno empurrao pra fora da parede
+                    c.model:TranslateBy(normal * 0.5)
+                else
+                    -- Caminho livre: move normalmente
+                    c.model:TranslateBy(c.direcao * distanciaMovimento)
+                end
+
+                -- Rotaciona o modelo pra olhar na direcao do movimento
+                local alvoPos = c.primary.Position + c.direcao
+                local novaCFrame = CFrame.lookAt(c.primary.Position, alvoPos)
+                local atual = c.primary.CFrame
+                local nova = atual:Lerp(novaCFrame, 0.15)
+                c.model:PivotTo(CFrame.new(c.primary.Position) * (nova - nova.Position))
             end
         end
-        task.wait(0.2)
+        task.wait(0.1)
     end
 end)
 
@@ -339,10 +489,8 @@ task.spawn(function()
                                 if c.model.Parent then c.model:Destroy() end
                             end)
 
-                            -- Som de coleta
-                            local beep = Instance.new("Sound")
-                            beep.SoundId = "rbxassetid://322911410"
-                            beep.Volume = 0.6
+                            -- Som de coleta (coin do Subway Surfers)
+                            local beep = coinSound:Clone()
                             beep.Parent = workspace
                             beep:Play()
                             task.delay(1.5, function() beep:Destroy() end)
@@ -350,6 +498,7 @@ task.spawn(function()
                             -- Fim?
                             if coletados >= TOTAL_CARACOIS then
                                 ativo = false
+                                jogoAtivo = false  -- para o timer tambem
                                 som:Stop()
 
                                 -- Mensagem de vitoria
